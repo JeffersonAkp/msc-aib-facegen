@@ -7,3 +7,12 @@ __pycache__/
 data/
 outputs/
 wandb/
+
+# Garder le code de src/data suivi par Git
+!src/data/
+!src/data/**
+
+# Ne PAS versionner les poids et sorties
+/weights/
+/outputs/
+*.pth

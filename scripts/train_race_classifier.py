@@ -1,67 +1,96 @@
 """
-Entraîne un petit classifieur race (7 classes FairFace) pour le Mode strict.
-- Utilise ResNet18 pré-entraîné ImageNet, fine-tuning rapide.
-- Enregistre les poids dans: weights/fairface_race_resnet18.pth
+Entraîne un petit classifieur "race" (7 classes FairFace) pour le Mode strict.
+- Backbone : ResNet18 pré-entraîné ImageNet (fine-tuning rapide).
+- Sauvegarde des poids : weights/fairface_race_resnet18.pth
 
-Exemple:
-    python -m scripts.train_race_classifier --subset 0.25 --epochs 2 --batch 64 --lr 1e-3
+Exemples :
+    # entraînement RAPIDE sur CPU (petit sous-ensemble)
+    python -m scripts.train_race_classifier --subset 0.25 --epochs 1 --batch 32 --num-workers 0 \
+        --freeze_backbone --train-split "train[:4000]" --val-split "validation[:1000]"
+
+    # plus complet (à éviter sur CPU si pressé)
+    python -m scripts.train_race_classifier --subset 0.25 --epochs 2 --batch 64 --num-workers 0
 """
 
 import os
 import argparse
-from typing import Dict, Any
+from typing import Optional, Dict, Tuple
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-
-from torchvision import models, transforms
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from datasets import load_dataset
 
-# --- Transforms (ImageNet) ---
+
+# ----------------------------
+# Transforms (ImageNet standard)
+# ----------------------------
 TF = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    # Normalisation ImageNet (pour ResNet18)
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225]),
 ])
 
-def make_preprocess():
-    def _pp(ex):
+
+class FairFaceTorchDataset(Dataset):
+    """
+    Wrapper PyTorch sur un split HF : retourne (tensor, label) par __getitem__.
+    """
+    def __init__(self, hf_split):
+        self.ds = hf_split
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx: int):
+        ex: Dict = self.ds[idx]  # ex["image"] est un PIL Image
         img = ex["image"].convert("RGB")
-        ex["pixel_values"] = TF(img)
-        ex["labels"] = int(ex["race"])  # 0..6
-        return ex
-    return _pp
+        x = TF(img)                  # Tensor [3,224,224]
+        y = int(ex["race"])          # 0..6
+        return x, y
 
-def collate(batch):
-    # batch: list of dicts with keys: pixel_values (tensor 3x224x224), labels (int)
-    xs = torch.stack([b["pixel_values"] for b in batch], dim=0)
-    ys = torch.tensor([b["labels"] for b in batch], dtype=torch.long)
-    return xs, ys
 
-def build_loaders(subset: str, batch_size: int, num_workers: int = 2):
-    ds = load_dataset("HuggingFaceM4/FairFace", subset)
-    train_ds = ds["train"]
-    val_ds = ds.get("validation", None)
+def build_loaders(subset: str, batch_size: int, train_split: str, val_split: Optional[str],
+                  num_workers: int = 0) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """
+    Construit DataLoader train/val pour FairFace avec splits HF explicites.
+    Exemples de splits :
+      - "train" (complet) ou "train[:4000]" (sous-ensemble)
+      - "validation" ou "validation[:1000]"
+    """
+    # Chargement direct des splits demandés
+    hf_train = load_dataset("HuggingFaceM4/FairFace", subset, split=train_split)
+    train_ds = FairFaceTorchDataset(hf_train)
 
-    pp = make_preprocess()
-    train_ds = train_ds.with_transform(pp)
-    if val_ds is not None:
-        val_ds = val_ds.with_transform(pp)
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True, collate_fn=collate)
     val_loader = None
-    if val_ds is not None:
-        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True, collate_fn=collate)
+    pin = torch.cuda.is_available()
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin
+    )
+
+    if val_split:
+        try:
+            hf_val = load_dataset("HuggingFaceM4/FairFace", subset, split=val_split)
+            val_ds = FairFaceTorchDataset(hf_val)
+            val_loader = DataLoader(
+                val_ds, batch_size=batch_size, shuffle=False,
+                num_workers=num_workers, pin_memory=pin
+            )
+        except Exception:
+            val_loader = None
+
+    print(f"[Data] train_split='{train_split}' → {len(train_ds)} exemples | "
+          f"val_split='{val_split}' → {len(val_loader.dataset) if val_loader else 0} exemples")
     return train_loader, val_loader
 
-def train_one_epoch(model, loader, opt, device):
+
+def train_one_epoch(model: nn.Module, loader: DataLoader, opt: optim.Optimizer, device: str):
     model.train()
     total, correct, total_loss = 0, 0, 0.0
     for x, y in loader:
@@ -76,11 +105,11 @@ def train_one_epoch(model, loader, opt, device):
         pred = out.argmax(dim=1)
         correct += (pred == y).sum().item()
         total += x.size(0)
-
     return {"loss": total_loss / total, "acc": correct / total}
 
+
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model: nn.Module, loader: Optional[DataLoader], device: str):
     if loader is None:
         return {"loss": 0.0, "acc": 0.0}
     model.eval()
@@ -95,24 +124,37 @@ def evaluate(model, loader, device):
         total += x.size(0)
     return {"loss": total_loss / total, "acc": correct / total}
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--subset", type=str, default="0.25", help="FairFace subset: 0.25 ou 1.25")
-    ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--epochs", type=int, default=1)
+    ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--freeze_backbone", action="store_true", help="geler le backbone (ne fine-tune que la tête)")
+    ap.add_argument("--freeze_backbone", action="store_true",
+                    help="Geler le backbone (fine-tune seulement la tête).")
+    ap.add_argument("--num-workers", type=int, default=0,
+                    help="Workers DataLoader (0 recommandé sous Windows).")
+    ap.add_argument("--train-split", type=str, default="train[:4000]",
+                    help="Split HF pour le train (ex: 'train' ou 'train[:4000]')")
+    ap.add_argument("--val-split", type=str, default="validation[:1000]",
+                    help="Split HF pour la val (ex: 'validation' ou 'validation[:1000]'; vide pour désactiver)")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs("weights", exist_ok=True)
 
-    train_loader, val_loader = build_loaders(args.subset, args.batch)
+    train_loader, val_loader = build_loaders(
+        args.subset, args.batch, train_split=args.train_split,
+        val_split=(args.val_split if args.val_split else None),
+        num_workers=args.num_workers
+    )
 
     # --- Modèle ---
     from torchvision.models import resnet18, ResNet18_Weights
     model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
     model.fc = nn.Linear(model.fc.in_features, 7)
+
     if args.freeze_backbone:
         for name, p in model.named_parameters():
             if not name.startswith("fc."):
@@ -129,7 +171,6 @@ def main():
         print(f"[Epoch {ep}] train: loss={tr['loss']:.4f} acc={tr['acc']:.4f} | "
               f"val: loss={va['loss']:.4f} acc={va['acc']:.4f}")
 
-        # sauvegarde si c'est le meilleur so far (sur val si dispo, sinon train)
         score = va["acc"] if val_loader is not None else tr["acc"]
         if score >= best_acc:
             best_acc = score
@@ -137,6 +178,7 @@ def main():
             print(f"✔️  Saved: weights/fairface_race_resnet18.pth (acc={best_acc:.4f})")
 
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
