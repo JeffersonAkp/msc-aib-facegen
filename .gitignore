@@ -1,18 +1,26 @@
-# Python
-.venv/
-__pycache__/
-*.pyc
-
-# Data / artifacts
-data/
-outputs/
-wandb/
-
-# Garder le code de src/data suivi par Git
+# garder le code de src/data
 !src/data/
 !src/data/**
 
-# Ne PAS versionner les poids et sorties
+# ignorer caches & artefacts
+__pycache__/
+*.py[cod]
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# environnements
+.venv/
+venv/
+.env
+.envrc
+
+# poids / sorties / data locale
 /weights/
 /outputs/
+/data/
 *.pth
+*.pt
+*.ckpt
+/runs/
+/logs/
