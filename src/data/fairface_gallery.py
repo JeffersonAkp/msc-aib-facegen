@@ -172,60 +172,73 @@ def sample_k_images(age: int, gender_label: str, race_label_fr: str, k: int = 6,
 # ---------------------------------------------------------------------
 # Version stricte (revalidation par classifieur race)
 # ---------------------------------------------------------------------
-def sample_k_images_strict(age: int, gender_label: str, race_label_fr: str,
+
+def sample_k_images_strict(age: int, gender_label: str, race_label: str,
                            k: int = 6, subset: str = "0.25",
                            k_candidates: int = 60, min_prob: float = 0.7,
                            deterministic: bool = True):
     """
-    1) Filtre (age, genre, race) → candidats
-    2) Prend jusqu'à k_candidates images (ordre déterministe ou shuffle)
-    3) Classifie avec FairFaceRaceClassifier → proba(7)
-    4) Garde celles où argmax == race_id demandé ET proba[race_id] >= min_prob
-    5) Trie par proba décroissante et renvoie les k meilleures
-    Fallback: si < k, complète par la version non stricte.
+    Version stricte (classement) :
+      - filtre sur (age, genre, race) → candidates
+      - prend k_candidates indices (déterministe ou random)
+      - FairFaceRaceClassifier -> proba par classe
+      - garde celles dont argmax == race_id ET p[race_id] >= min_prob
+      - trie par p[race_id] décroissant
+      - retourne les k meilleures avec meta['score']=p[race_id]
+      - fallback: complète avec la version non-stricte si pas assez d'exemples
     """
     ds = load_fairface_train(subset)
+
     age_c = age_to_class(age)
     gid = UI_GENDER_TO_ID.get(gender_label, None)
-    rid = race_id_from_fr(race_label_fr) if race_label_fr is not None else None
+    rid = UI_RACE_TO_ID.get(race_label, None)
 
     candidates = _filter_indices(ds, age_c, gid, rid)
     if not candidates:
-        return sample_k_images(age, gender_label, race_label_fr, k=k, subset=subset)
+        return sample_k_images(age, gender_label, race_label, k=k, subset=subset)
 
     if deterministic:
         picked_idx = sorted(candidates)[:k_candidates]
     else:
+        import random
         random.shuffle(candidates)
         picked_idx = candidates[:k_candidates]
 
-    pil_list, metas = [], []
+    # Charge images + metas légères
+    pils, metas = [], []
     for i in picked_idx:
         ex = ds[i]
-        race_id = int(ex["race"])
-        pil_list.append(ex["image"])
+        pils.append(ex["image"])
         metas.append({
-            "age_class": int(ex["age"]),
-            "age_range": AGE_LABELS.get(int(ex["age"]), str(ex["age"])),
-            "gender": GENDER_LABELS.get(int(ex["gender"]), str(ex["gender"])),
-            "race_fr": race_fr_from_id(race_id),
-            "race_id": race_id,
+            "age_class": ex["age"],
+            "age_range": AGE_LABELS.get(ex["age"], str(ex["age"])),
+            "gender": GENDER_LABELS.get(ex["gender"], str(ex["gender"])),
+            "race": RACE_LABELS.get(ex["race"], str(ex["race"])),
+            "race_id": ex["race"],
             "index": i,
             "used_strategy": (age_c, gid, rid),
         })
 
-    clf = FairFaceRaceClassifier()          # charge weights/fairface_race_resnet18.pth
-    probs = clf.predict_proba(pil_list)     # Tensor (N, 7)
-    p = probs.numpy()
-    argmax = p.argmax(axis=1)
-    keep = (argmax == rid) & (p[:, rid] >= float(min_prob))
+    # Classement via classifieur race
+    clf = FairFaceRaceClassifier()  # poids: weights/fairface_race_resnet18.pth
+    probs = clf.predict_proba(pils).numpy()  # (N,7)
+    argmax = probs.argmax(axis=1)
+    keep_mask = (argmax == rid) & (probs[:, rid] >= float(min_prob))
 
-    kept = [(pil_list[i], metas[i], p[i, rid]) for i in range(len(p)) if keep[i]]
-    kept.sort(key=lambda t: t[2], reverse=True)
+    ranked = []
+    for i, ok in enumerate(keep_mask):
+        if ok:
+            m = dict(metas[i])
+            m["score"] = float(probs[i, rid])
+            ranked.append((pils[i], m))
 
-    out = [(im, m) for (im, m, _) in kept[:k]]
-    short = k - len(out)
-    if short > 0:
-        extra = sample_k_images(age, gender_label, race_label_fr, k=short, subset=subset)
+    # trie par score décroissant
+    ranked.sort(key=lambda t: t[1]["score"], reverse=True)
+    out = ranked[:k]
+
+    # fallback si pas assez
+    if len(out) < k:
+        extra = sample_k_images(age, gender_label, race_label, k=k - len(out), subset=subset)
         out.extend(extra)
+
     return out
