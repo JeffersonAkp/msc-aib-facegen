@@ -1,9 +1,26 @@
-# Python
-.venv/
-__pycache__/
-*.pyc
+# garder le code de src/data
+!src/data/
+!src/data/**
 
-# Data / artifacts
-data/
-outputs/
-wandb/
+# ignorer caches & artefacts
+__pycache__/
+*.py[cod]
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# environnements
+.venv/
+venv/
+.env
+.envrc
+
+# poids / sorties / data locale
+/weights/
+/outputs/
+/data/
+*.pth
+*.pt
+*.ckpt
+/runs/
+/logs/
