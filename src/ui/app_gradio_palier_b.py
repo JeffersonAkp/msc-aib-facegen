@@ -8,25 +8,31 @@ Palier B — Classement + Combinaisons
 import gradio as gr
 from datasets import get_dataset_config_names
 
-from src.data.fairface_constants import ETHNIE_CHOICES   # ✅ on n'importe que ça
+from src.data.fairface_constants import ETHNIE_CHOICES
 from src.data.fairface_gallery import sample_k_images_strict
 from src.utils.img_ops import mean_face, blend
 
 # Configs HF disponibles (fallback si offline)
-AVAILABLE_CONFIGS = get_dataset_config_names("HuggingFaceM4/FairFace") or ["0.25", "1.25"]
+try:
+    AVAILABLE_CONFIGS = get_dataset_config_names("HuggingFaceM4/FairFace")
+    if not AVAILABLE_CONFIGS:
+        AVAILABLE_CONFIGS = ["0.25", "1.25"]
+except Exception:
+    AVAILABLE_CONFIGS = ["0.25", "1.25"]
+
 
 def ui_generate(mode, subset, age, gender, ethnie, k, k_cand, thr, alpha):
     try:
-        # Le strict filtre + classe via le classifieur et renvoie des (PIL, meta)
+        # Strict = filtrage + revalidation classifieur
         items = sample_k_images_strict(
             age=age,
             gender_label=gender,
-            race_label=ethnie,             # ✅ libellé direct, pas d’ID
+            race_label_fr=ethnie,        # ✅ libellé FR -> id interne
             k=int(k if mode != "Interpolation 2" else max(2, k)),
             subset=subset,
             k_candidates=int(k_cand),
             min_prob=float(thr),
-            deterministic=True
+            deterministic=True,
         )
         if not items:
             return None, "**Aucun résultat.**", None
@@ -38,7 +44,7 @@ def ui_generate(mode, subset, age, gender, ethnie, k, k_cand, thr, alpha):
             gallery = [
                 (
                     p,
-                    f"{m['race']} (id={m['race_id']}) | {m['gender']} | {m['age_range']} | "
+                    f"{m['race_fr']} (id={m['race_id']}) | {m['gender']} | {m['age_range']} | "
                     f"score={m.get('score', 0):.2f} | idx={m['index']}"
                 )
                 for p, m in items
@@ -46,8 +52,9 @@ def ui_generate(mode, subset, age, gender, ethnie, k, k_cand, thr, alpha):
             return None, f"{len(gallery)} images triées (seuil={thr})", gallery
 
         if mode == "Visage moyen (k)":
-            img = mean_face(pils[:k])
-            cap = f"Visage moyen de {min(len(pils), k)} images  \n(seuil={thr}, k_candidats={k_cand})"
+            kk = int(k)
+            img = mean_face(pils[:kk])
+            cap = f"Visage moyen de {min(len(pils), kk)} images  \n(seuil={thr}, k_candidats={k_cand})"
             return img, cap, None
 
         # Interpolation 2

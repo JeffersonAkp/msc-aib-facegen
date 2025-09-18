@@ -173,7 +173,7 @@ def sample_k_images(age: int, gender_label: str, race_label_fr: str, k: int = 6,
 # Version stricte (revalidation par classifieur race)
 # ---------------------------------------------------------------------
 
-def sample_k_images_strict(age: int, gender_label: str, race_label: str,
+def sample_k_images_strict(age: int, gender_label: str, race_label_fr: str,
                            k: int = 6, subset: str = "0.25",
                            k_candidates: int = 60, min_prob: float = 0.7,
                            deterministic: bool = True):
@@ -191,37 +191,42 @@ def sample_k_images_strict(age: int, gender_label: str, race_label: str,
 
     age_c = age_to_class(age)
     gid = UI_GENDER_TO_ID.get(gender_label, None)
-    rid = UI_RACE_TO_ID.get(race_label, None)
+    # ✅ conversion robuste: FR -> id officiel HF
+    rid = race_id_from_fr(race_label_fr) if race_label_fr is not None else None
 
+    # 1) candidats stricts par labels
     candidates = _filter_indices(ds, age_c, gid, rid)
     if not candidates:
-        return sample_k_images(age, gender_label, race_label, k=k, subset=subset)
+        # fallback si rien ne matche
+        return sample_k_images(age, gender_label, race_label_fr, k=k, subset=subset)
 
+    # 2) sélectionne k_candidates exemples
     if deterministic:
         picked_idx = sorted(candidates)[:k_candidates]
     else:
-        import random
         random.shuffle(candidates)
         picked_idx = candidates[:k_candidates]
 
-    # Charge images + metas légères
+    # 3) charge images + métadonnées légères
     pils, metas = [], []
     for i in picked_idx:
         ex = ds[i]
+        race_id = int(ex["race"])
         pils.append(ex["image"])
         metas.append({
-            "age_class": ex["age"],
-            "age_range": AGE_LABELS.get(ex["age"], str(ex["age"])),
-            "gender": GENDER_LABELS.get(ex["gender"], str(ex["gender"])),
-            "race": RACE_LABELS.get(ex["race"], str(ex["race"])),
-            "race_id": ex["race"],
+            "age_class": int(ex["age"]),
+            "age_range": AGE_LABELS.get(int(ex["age"]), str(ex["age"])),
+            "gender": GENDER_LABELS.get(int(ex["gender"]), str(ex["gender"])),
+            "race_fr": race_fr_from_id(race_id),   # ✅ libellé FR cohérent
+            "race_id": race_id,
             "index": i,
             "used_strategy": (age_c, gid, rid),
         })
 
-    # Classement via classifieur race
-    clf = FairFaceRaceClassifier()  # poids: weights/fairface_race_resnet18.pth
-    probs = clf.predict_proba(pils).numpy()  # (N,7)
+    # 4) classement via le classifieur race
+    clf = FairFaceRaceClassifier()  # attend weights/fairface_race_resnet18.pth
+    probs = clf.predict_proba(pils).numpy()   # (N,7)
+
     argmax = probs.argmax(axis=1)
     keep_mask = (argmax == rid) & (probs[:, rid] >= float(min_prob))
 
@@ -229,16 +234,16 @@ def sample_k_images_strict(age: int, gender_label: str, race_label: str,
     for i, ok in enumerate(keep_mask):
         if ok:
             m = dict(metas[i])
-            m["score"] = float(probs[i, rid])
+            m["score"] = float(probs[i, rid])    # confiance de la classe cible
             ranked.append((pils[i], m))
 
-    # trie par score décroissant
+    # 5) tri par score décroissant + coupe à k
     ranked.sort(key=lambda t: t[1]["score"], reverse=True)
     out = ranked[:k]
 
-    # fallback si pas assez
+    # 6) fallback si pas assez d'images
     if len(out) < k:
-        extra = sample_k_images(age, gender_label, race_label, k=k - len(out), subset=subset)
+        extra = sample_k_images(age, gender_label, race_label_fr, k=k - len(out), subset=subset)
         out.extend(extra)
 
     return out
